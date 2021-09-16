@@ -38,8 +38,11 @@ Database Tables and Fields:
 	tracker = {} --used for storing vms that need outcalling
 	outcalls = {} --used for storing outcalls that will happen
 	values_returned = 0 -- var to see if there is any values in the query
+	max_returned = 0 -- var to see if there is any values in the max query
 	i = 0 --increment variable
 	existing = 0 --variable to track if a message uuid exists while looping through and checking the msgs and tracker arrays
+	max = {} --used to store the max values for each tracked vm
+	max2 = {} --used to store the max values for each tracked vm
 
 
 ---------------------------------------------------
@@ -77,6 +80,27 @@ else
 	freeswitch.consoleLog("notice", "No voicemails in need of outcalling" .. "\n");
 end
 
+--if it exists then we need to check if the 'last_position' went over the max
+dbh:query('SELECT MAX(vvod."position"),vm.voicemail_uuid FROM v_voicemail_messages vm INNER JOIN v_voicemail_outcall voc ON (vm.voicemail_uuid = voc.voicemail_uuid) inner join v_voicemail_outcall_destinations vvod on (voc.voicemail_uuid = vvod.voicemail_uuid) group by vm.voicemail_uuid', params, function(max)
+	for key, val in pairs(results) do
+		max[key] = results[val]
+		freeswitch.consoleLog("notice", "Max Array:   " .. key.. "["..i.."]: " .. val .. "\n");
+	end
+	max_returned = 1
+end);
+if (max_returned == 1) then --if there are results returned from Max then continute
+	dbh:query("select voicemail_message_uuid,last_position from v_voicemail_outcall_tracker", params, function(result)
+		for key, val in pairs(result) do
+			max2[key] = val
+			if (debug["sql"]) then
+				freeswitch.consoleLog("notice", "Tracker Status:   " .. key.. "["..i.."]: " .. val .. "\n");
+			end
+		end
+	end);
+else
+	freeswitch.consoleLog("notice", "Max array is blank\n");
+end
+
 if (values_returned == 1) then -- there are already values so we must compare the msgs array with the tracker array
 	values_returned = 0 --reset values_returned
 	for key,val in pairs(msgs) do
@@ -87,6 +111,7 @@ if (values_returned == 1) then -- there are already values so we must compare th
 				existing = 1
 			end
 		end
+
 		if (existing == 1) then
 			freeswitch.consoleLog("notice", "EXISTING:   " .. key.. ": " .. val .. "\n");
 		else
@@ -101,37 +126,45 @@ else --there are no values in the tracker db table so we can add all of the resu
 	end
 end
 
+
+
+		--
+		-- NEED TO ADD LOGIC FOR WHEN THE tracker increments past the max
+		--
+
+
+
 ---------------------------------------------------
 --       PART TWO: Start of the outcalling       --
 ---------------------------------------------------
-dbh:query('SELECT vvot.last_position,voc.caller_id , vm.voicemail_uuid, vm.voicemail_message_uuid,vvod.outcall_digits,vvod.gateway_uuid FROM v_voicemail_messages vm INNER JOIN v_voicemail_outcall voc ON (vm.voicemail_uuid = voc.voicemail_uuid) inner join v_voicemail_outcall_destinations vvod on (voc.voicemail_uuid = vvod.voicemail_uuid) inner join v_voicemail_outcall_tracker vvot on (vm.voicemail_message_uuid = vvot.voicemail_message_uuid) WHERE voc.enabled = true AND voc.acknowledged = false AND vvot.last_position = vvod."position" group by vm.voicemail_message_uuid,vm.voicemail_uuid,voc.caller_id,vvod.outcall_digits,vvod.outcall_digits,vvot.last_position,vvod.gateway_uuid', params, function(result)
-	for key, val in pairs(result) do
-		freeswitch.consoleLog("notice", "Calling:   " .. key.. ": " .. val .. "\n");
-		if (key == 'last_position') then
-			--attempt the call
-			outSession = freeswitch.Session("{origination_caller_id_name="..result["caller_id"]..",origination_caller_id_number=".. "9057592660" .."}sofia/gateway/".. result["gateway_uuid"] .."/".. result["outcall_digits"])
-			outSession:setAutoHangup(true)
-			while(outSession:ready() and dispoA ~= "ANSWER") do
-				dispoA = outSession:getVariable("endpoint_disposition")
-				freeswitch.consoleLog("INFO","Leg A disposition is '" .. dispoA .. "'\n")
-				os.execute("sleep 1")
-			end
-			if ( outSession:ready() ) then
-				--pause for 1 second
-				outSession:execute("sleep", 1000)
-				digits = outSession:playAndGetDigits(1, 1, 3, 5000, "", "wav_location_temp", "/error.wav", "\\d+")
-				outSession:hangup();
-				dbh:query('UPDATE v_voicemail_outcall_tracker SET last_position = '.. result["last_position"] + 1 ..' WHERE voicemail_message_uuid = '..result['voicemail_message_uuid']..'', params);
-			else
-				-- opps, lost leg A handle this case
-				freeswitch.consoleLog("NOTICE","It appears that outSession is disconnected...\n")
+-- dbh:query('SELECT vvot.last_position,voc.caller_id , vm.voicemail_uuid, vm.voicemail_message_uuid,vvod.outcall_digits,vvod.gateway_uuid FROM v_voicemail_messages vm INNER JOIN v_voicemail_outcall voc ON (vm.voicemail_uuid = voc.voicemail_uuid) inner join v_voicemail_outcall_destinations vvod on (voc.voicemail_uuid = vvod.voicemail_uuid) inner join v_voicemail_outcall_tracker vvot on (vm.voicemail_message_uuid = vvot.voicemail_message_uuid) WHERE voc.enabled = true AND voc.acknowledged = false AND vvot.last_position = vvod."position" group by vm.voicemail_message_uuid,vm.voicemail_uuid,voc.caller_id,vvod.outcall_digits,vvod.outcall_digits,vvot.last_position,vvod.gateway_uuid', params, function(result)
+	-- for key, val in pairs(result) do
+	-- 	freeswitch.consoleLog("notice", "Calling:   " .. key.. ": " .. val .. "\n");
+	-- 	if (key == 'last_position') then --this is to limit only one loop per vm
+	-- 		--attempt the call
+	-- 		outSession = freeswitch.Session("{origination_caller_id_name="..result["caller_id"]..",origination_caller_id_number=".. "9057592660" .."}sofia/gateway/".. result["gateway_uuid"] .."/".. result["outcall_digits"])
+	-- 		outSession:setAutoHangup(true)
+	-- 		while(outSession:ready() and dispoA ~= "ANSWER") do
+	-- 			dispoA = outSession:getVariable("endpoint_disposition")
+	-- 			freeswitch.consoleLog("INFO","Leg A disposition is '" .. dispoA .. "'\n")
+	-- 			os.execute("sleep 1")
+	-- 		end
+	-- 		if ( outSession:ready() ) then
+	-- 			--pause for 1 second
+	-- 			outSession:execute("sleep", 1000)
+	-- 			digits = outSession:playAndGetDigits(1, 1, 3, 5000, "", "wav_location_temp", "/error.wav", "\\d+")
+	-- 			outSession:hangup();
+	-- 			dbh:query('UPDATE v_voicemail_outcall_tracker SET last_position = '.. result["last_position"] + 1 .." WHERE voicemail_message_uuid = '"..result['voicemail_message_uuid'].."'", params);
+	-- 		else
+	-- 			-- opps, lost leg A handle this case
+	-- 			freeswitch.consoleLog("NOTICE","It appears that outSession is disconnected...\n")
 		
 		
-				-- log the hangup cause
-				local outCause = outSession:hangupCause()
-				freeswitch.consoleLog("info", "outSession:hangupCause() = " .. outCause)
-			end
-			outSession:hangup();
-		end
-	end
-end);
+	-- 			-- log the hangup cause
+	-- 			local outCause = outSession:hangupCause()
+	-- 			freeswitch.consoleLog("info", "outSession:hangupCause() = " .. outCause)
+	-- 		end
+	-- 		outSession:hangup();
+	-- 	end
+	-- end
+-- end);
